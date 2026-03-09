@@ -35,6 +35,17 @@ class Config:
     # ── 飞书云文档知识库（逗号分隔多个文档 token）──────────────
     FEISHU_DOC_TOKENS = os.getenv("FEISHU_DOC_TOKENS", "")
 
+    # ── 对话历史配置 ──────────────────────────────────────────
+    MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "10"))
+    HISTORY_TTL = int(os.getenv("HISTORY_TTL", "1800"))  # 秒，默认 30 分钟
+
+    # ── 管理员（逗号分隔的 open_id，可使用 /reload 等指令）──
+    ADMIN_OPEN_IDS: set[str] = {
+        uid.strip()
+        for uid in os.getenv("ADMIN_OPEN_IDS", "").split(",")
+        if uid.strip()
+    }
+
     @classmethod
     def validate(cls):
         """启动时校验必要配置是否齐全"""

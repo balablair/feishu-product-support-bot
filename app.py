@@ -3,6 +3,7 @@
 使用飞书官方 Python SDK lark-oapi，无需 Flask / ngrok / 公网地址
 """
 
+import collections
 import json
 import logging
 import os
@@ -15,7 +16,13 @@ from threading import Lock
 import requests
 import lark_oapi as lark
 import base64
-from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody, GetMessageResourceRequest
+from lark_oapi.api.im.v1 import (
+    CreateMessageRequest,
+    CreateMessageRequestBody,
+    GetMessageResourceRequest,
+    ReplyMessageRequest,
+    ReplyMessageRequestBody,
+)
 
 from config import Config
 from feedback import ai_detect_and_classify, save_feedback, should_reply
@@ -122,6 +129,48 @@ _processed_events: dict[str, float] = {}
 _event_lock = Lock()
 EVENT_DEDUPE_TTL = 300  # 秒
 
+# ── 对话历史（多轮上下文）────────────────────────────────────────────────────
+# key: thread_id（thread 内对话）或 "chat:{chat_id}:user:{open_id}"（独立消息）
+# value: deque of {"role": "user"/"assistant", "content": "..."}
+_histories: dict[str, collections.deque] = {}
+_history_timestamps: dict[str, float] = {}
+_history_lock = Lock()
+MAX_HISTORY_TURNS = Config.MAX_HISTORY_TURNS  # 每段对话保留的轮数（1轮 = user+assistant）
+HISTORY_TTL = Config.HISTORY_TTL              # 无活动后多少秒重置对话（默认 30 分钟）
+
+
+def _get_context_key(message, sender_id: str) -> str:
+    """
+    确定对话上下文 key：
+    - 消息在 thread 中（root_id 不为空）→ 用 thread_id，thread 内所有人共享上下文
+    - 普通群消息 → 用 chat+user，每个用户独立上下文
+    """
+    root_id = getattr(message, "root_id", "") or ""
+    if root_id:
+        return f"thread:{root_id}"
+    return f"chat:{message.chat_id}:user:{sender_id}"
+
+
+def _get_history(key: str) -> list[dict]:
+    """获取对话历史，若已超过 TTL 则重置"""
+    now = time.time()
+    with _history_lock:
+        if key in _history_timestamps and now - _history_timestamps[key] > HISTORY_TTL:
+            _histories.pop(key, None)
+            _history_timestamps.pop(key, None)
+        return list(_histories.get(key, []))
+
+
+def _add_to_history(key: str, user_text: str, assistant_reply: str) -> None:
+    """将本轮对话追加到历史，超出 MAX_HISTORY_TURNS 时自动丢弃最旧的"""
+    with _history_lock:
+        if key not in _histories:
+            # maxlen = 轮数 * 2（每轮 1 条 user + 1 条 assistant）
+            _histories[key] = collections.deque(maxlen=MAX_HISTORY_TURNS * 2)
+        _histories[key].append({"role": "user", "content": user_text})
+        _histories[key].append({"role": "assistant", "content": assistant_reply})
+        _history_timestamps[key] = time.time()
+
 
 def _is_duplicate(event_id: str) -> bool:
     """基于 event_id 去重，TTL 内的相同事件视为重复"""
@@ -138,9 +187,37 @@ def _is_duplicate(event_id: str) -> bool:
         return False
 
 
-# ── 飞书：发送文本消息 ────────────────────────────────────────────────────────
+# ── 飞书：回复消息（在 thread 中）────────────────────────────────────────────
+def reply_to_message(message_id: str, text: str) -> bool:
+    """
+    回复指定消息，自动在 thread 中展开。
+    首次回复会新建 thread，后续回复会追加到同一 thread。
+    """
+    try:
+        req = (
+            ReplyMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                ReplyMessageRequestBody.builder()
+                .content(json.dumps({"text": text}))
+                .msg_type("text")
+                .build()
+            )
+            .build()
+        )
+        resp = feishu_client.im.v1.message.reply(req)
+        if not resp.success():
+            logger.error(f"回复消息失败: code={resp.code}, msg={resp.msg}")
+            return False
+        logger.info(f"已回复消息 {message_id}")
+        return True
+    except Exception as e:
+        logger.error(f"回复消息异常: {e}")
+        return False
+
+
 def send_text_message(chat_id: str, text: str) -> bool:
-    """向指定群发送普通文本消息"""
+    """向指定群发送独立消息（不在 thread 中，用于主动通知场景）"""
     try:
         request = (
             CreateMessageRequest.builder()
@@ -206,14 +283,22 @@ def _build_system_prompt() -> str:
     return base + _NO_MARKDOWN
 
 
-def generate_reply(text: str) -> str:
+def generate_reply(text: str, history: list[dict] | None = None) -> str:
     """
-    调用 OpenAI API 生成自然对话回复
-    失败时返回兜底回复，保证主流程不中断
+    调用 AI API 生成回复。
+    history 为本轮之前的对话记录（[{"role": "user/assistant", "content": "..."}]），
+    传入后 AI 可感知对话上下文，实现多轮对话。
+    失败时返回兜底回复，保证主流程不中断。
     """
     if not Config.OPENAI_API_KEY:
         logger.warning("未配置 OPENAI_API_KEY")
         return "收到，稍后回复你。"
+
+    # 构建消息列表：system → 历史对话 → 当前用户消息
+    messages = [{"role": "system", "content": _build_system_prompt()}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": text})
 
     try:
         resp = requests.post(
@@ -224,21 +309,18 @@ def generate_reply(text: str) -> str:
             },
             json={
                 "model": Config.OPENAI_MODEL,
-                "messages": [
-                    {"role": "system", "content": _build_system_prompt()},
-                    {"role": "user", "content": text},
-                ],
+                "messages": messages,
                 "temperature": 0.7,
             },
             timeout=15,
         )
         resp.raise_for_status()
         reply = resp.json()["choices"][0]["message"]["content"].strip()
-        logger.info(f"AI 回复: {reply}")
+        logger.info(f"AI 回复（历史 {len(history or [])} 条）: {reply[:100]}")
         return reply
 
     except Exception as e:
-        logger.error(f"调用 OpenAI API 失败: {e}")
+        logger.error(f"调用 AI API 失败: {e}")
         return "收到，稍后回复你。"
 
 
@@ -296,9 +378,24 @@ def generate_reply_with_image(image_b64: str, text: str = "") -> str:
         return "收到，稍后回复你。"
 
 
+# ── 知识库热更新 ───────────────────────────────────────────────────────────────
+def reload_knowledge() -> str:
+    """重新加载本地文件和飞书云文档知识库，返回状态描述"""
+    global KNOWLEDGE
+    local = load_knowledge()
+    cloud = load_feishu_docs(feishu_client)
+    if local and cloud:
+        KNOWLEDGE = local + "\n\n" + cloud
+    else:
+        KNOWLEDGE = local or cloud
+    msg = f"知识库已重新加载，共 {len(KNOWLEDGE)} 字符。"
+    logger.info(msg)
+    return msg
+
+
 # ── 消息处理主逻辑 ────────────────────────────────────────────────────────────
 def handle_message(data: lark.im.v1.P2ImMessageReceiveV1):
-    """核心处理：提取文本/图片 → AI 生成回复 → 发送"""
+    """核心处理：提取文本/图片 → 带上下文调用 AI → thread 内回复"""
     try:
         message = data.event.message
         sender = data.event.sender
@@ -310,16 +407,17 @@ def handle_message(data: lark.im.v1.P2ImMessageReceiveV1):
 
         sender_id = sender.sender_id.open_id if sender.sender_id else "unknown"
 
+        # 确定本条消息的对话上下文 key
+        ctx_key = _get_context_key(message, sender_id)
+
         # ── 图片消息（纯图片 or 富文本 post 里包含图片）────────────────────────
         if message.message_type in ("image", "post"):
             content = json.loads(message.content)
 
-            # 纯图片消息
             if message.message_type == "image":
                 image_keys = [content.get("image_key", "")]
                 text = ""
             else:
-                # post 富文本：遍历所有 block 提取 image_key 和文本
                 image_keys = []
                 text_parts = []
                 for block in content.get("content", []):
@@ -332,19 +430,23 @@ def handle_message(data: lark.im.v1.P2ImMessageReceiveV1):
 
             image_keys = [k for k in image_keys if k]
             if not image_keys:
-                # post 里没有图片，当普通文本处理
                 if text:
                     logger.info(f"收到 post 文本消息 [{message.message_id}] 来自 {sender_id}: {text[:80]}")
-                    reply = generate_reply(text)
-                    send_text_message(chat_id=message.chat_id, text=reply)
+                    history = _get_history(ctx_key)
+                    reply = generate_reply(text, history)
+                    reply_to_message(message.message_id, reply)
+                    _add_to_history(ctx_key, text, reply)
                 return
 
             logger.info(f"收到图片消息 [{message.message_id}] 来自 {sender_id}，图片数: {len(image_keys)}")
             image_b64 = download_image(message.message_id, image_keys[0])
             if image_b64:
                 reply = generate_reply_with_image(image_b64, text)
-                send_text_message(chat_id=message.chat_id, text=reply)
-                # 反馈检测：用视觉分析结果判断是否为反馈，是则带图写入 Bitable
+                reply_to_message(message.message_id, reply)
+                # 图片分析结果也写入历史，方便后续文字追问
+                user_hist = f"[用户发送了图片]{(' ' + text) if text else ''}"
+                _add_to_history(ctx_key, user_hist, reply)
+                # 反馈检测：异步写入 Bitable
                 feedback_text = f"{text}\n[图片内容：{reply}]" if text else f"[用户发送截图，图片内容：{reply}]"
                 def _record_image(ft=feedback_text, ib=__import__('base64').b64decode(image_b64)):
                     category, summary = ai_detect_and_classify(ft)
@@ -352,7 +454,7 @@ def handle_message(data: lark.im.v1.P2ImMessageReceiveV1):
                         save_feedback(feishu_client, sender_id, summary, message.chat_id, category, image_bytes=ib)
                 threading.Thread(target=_record_image, daemon=True).start()
             else:
-                send_text_message(chat_id=message.chat_id, text="图片下载失败，请重试。")
+                reply_to_message(message.message_id, "图片下载失败，请重试。")
             return
 
         # ── 非文本且非图片，跳过 ──────────────────────────────────────────────
@@ -360,21 +462,32 @@ def handle_message(data: lark.im.v1.P2ImMessageReceiveV1):
             logger.info(f"跳过不支持的消息类型: {message.message_type}")
             return
 
-        # 解析消息文本，去掉 @mention 标记（格式：<at user_id="xxx">名字</at>）
+        # 解析消息文本，去掉 @mention 标记
         raw_text = json.loads(message.content).get("text", "").strip()
         text = re.sub(r"<at[^>]*>[^<]*</at>", "", raw_text).strip()
-        was_mentioned = "<at" in raw_text  # 消息里有 @某人（含 @bot）
+        was_mentioned = "<at" in raw_text
 
         logger.info(f"收到消息 [{message.message_id}] 来自 {sender_id}: {text[:80]}")
+
+        # ── 管理员指令：/reload ────────────────────────────────────────────────
+        if text.strip() == "/reload":
+            if sender_id in Config.ADMIN_OPEN_IDS:
+                status = reload_knowledge()
+                reply_to_message(message.message_id, status)
+            else:
+                reply_to_message(message.message_id, "无权限执行此指令。")
+            return
 
         # ── 过滤：@bot 直接回复；否则 AI 判断是否产品相关 ──────────────────
         if not was_mentioned and not should_reply(text):
             logger.info("消息与产品无关，跳过回复")
             return
 
-        # ── AI 生成回复并发送 ─────────────────────────────────────────────────
-        reply = generate_reply(text)
-        send_text_message(chat_id=message.chat_id, text=reply)
+        # ── 带上下文生成回复，在 thread 中回复 ───────────────────────────────
+        history = _get_history(ctx_key)
+        reply = generate_reply(text, history)
+        reply_to_message(message.message_id, reply)
+        _add_to_history(ctx_key, text, reply)
 
         # ── 反馈检测：AI 判断是否为反馈，是则异步写入多维表格 ────────────────
         def _record():
