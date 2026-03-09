@@ -242,7 +242,7 @@ def send_text_message(chat_id: str, text: str) -> bool:
         return False
 
 
-# ── MiniMax：生成自然对话回复 ─────────────────────────────────────────────────
+# ── AI：生成自然对话回复 ──────────────────────────────────────────────────────
 def _load_soul() -> str:
     """加载 SOUL.md 作为 bot 的人格定义与行为规范"""
     soul_path = Path(__file__).parent / "SOUL.md"
