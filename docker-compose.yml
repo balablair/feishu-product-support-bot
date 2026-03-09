@@ -1,0 +1,8 @@
+services:
+  feishu-bot:
+    build: .
+    restart: always
+    env_file: .env
+    volumes:
+      - ./knowledge:/app/knowledge
+      - ./SOUL.md:/app/SOUL.md

@@ -1,0 +1,26 @@
+# 环境变量（含密钥，绝对不提交）
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# 知识库文件（可能含敏感内容，按需决定是否提交）
+knowledge/*.pdf
+knowledge/*.docx
+knowledge/*.pptx
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
