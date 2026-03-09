@@ -27,6 +27,7 @@ from lark_oapi.api.im.v1 import (
 from config import Config
 from feedback import ai_detect_and_classify, save_feedback, should_reply
 from docs import load_feishu_docs
+from rag import RAGIndex
 
 # ── 知识库加载 ────────────────────────────────────────────────────────────────
 def _extract_docx(path: Path) -> str:
@@ -123,6 +124,19 @@ _cloud_knowledge = load_feishu_docs(feishu_client)
 if _cloud_knowledge:
     KNOWLEDGE = (KNOWLEDGE + "\n\n" + _cloud_knowledge).strip() if KNOWLEDGE else _cloud_knowledge
     logger.info(f"云文档知识库已合并，知识库总计 {len(KNOWLEDGE)} 字符")
+
+# ── RAG 索引（向量化知识库，每次只检索相关片段）──────────────────────────────
+_rag = RAGIndex(
+    api_key=Config.EMBEDDING_API_KEY,
+    embed_url=Config.EMBEDDING_API_URL,
+    model=Config.EMBEDDING_MODEL,
+    top_k=Config.RAG_TOP_K,
+    chunk_size=Config.RAG_CHUNK_SIZE,
+)
+if KNOWLEDGE and Config.EMBEDDING_API_KEY:
+    threading.Thread(target=_rag.build, args=(KNOWLEDGE,), daemon=True).start()
+elif KNOWLEDGE:
+    logger.warning("未配置 EMBEDDING_API_KEY，RAG 不可用，将使用全量知识库模式")
 
 # ── 事件去重：避免飞书重复推送被重复处理 ────────────────────────────────────
 _processed_events: dict[str, float] = {}
@@ -272,14 +286,15 @@ _NO_MARKDOWN = """
 如果需要列举内容，用"1、2、3、"或换行代替。"""
 
 
-def _build_system_prompt() -> str:
+def _build_system_prompt(context: str = "") -> str:
     """
-    组装最终 system prompt：
-    SOUL.md（身份/风格/规则）+ knowledge/（产品知识）+ 格式强制要求
+    组装最终 system prompt：SOUL.md + 知识库内容（RAG 检索片段或全量兜底）+ 格式要求
+    context: RAG 检索出的相关片段；为空时退回全量知识库（RAG 未就绪时的兜底）
     """
     base = SOUL_PROMPT
-    if KNOWLEDGE:
-        base += "\n\n---\n\n以下是你可以参考的产品知识库内容，回答问题时优先依据此内容：\n\n" + KNOWLEDGE
+    kb_content = context or KNOWLEDGE
+    if kb_content:
+        base += "\n\n---\n\n以下是与当前问题最相关的知识库内容，回答时优先依据此内容：\n\n" + kb_content
     return base + _NO_MARKDOWN
 
 
@@ -295,7 +310,8 @@ def generate_reply(text: str, history: list[dict] | None = None) -> str:
         return "收到，稍后回复你。"
 
     # 构建消息列表：system → 历史对话 → 当前用户消息
-    messages = [{"role": "system", "content": _build_system_prompt()}]
+    context = _rag.retrieve(text) if _rag.is_ready else ""
+    messages = [{"role": "system", "content": _build_system_prompt(context)}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": text})
@@ -380,7 +396,7 @@ def generate_reply_with_image(image_b64: str, text: str = "") -> str:
 
 # ── 知识库热更新 ───────────────────────────────────────────────────────────────
 def reload_knowledge() -> str:
-    """重新加载本地文件和飞书云文档知识库，返回状态描述"""
+    """重新加载本地文件和飞书云文档知识库，并异步重建 RAG 索引"""
     global KNOWLEDGE
     local = load_knowledge()
     cloud = load_feishu_docs(feishu_client)
@@ -390,6 +406,12 @@ def reload_knowledge() -> str:
         KNOWLEDGE = local or cloud
     msg = f"知识库已重新加载，共 {len(KNOWLEDGE)} 字符。"
     logger.info(msg)
+    if KNOWLEDGE and Config.EMBEDDING_API_KEY:
+        def _rebuild():
+            ok = _rag.rebuild(KNOWLEDGE)
+            logger.info("RAG 索引重建完成" if ok else "RAG 索引重建失败，已回退到全量模式")
+        threading.Thread(target=_rebuild, daemon=True).start()
+        msg += " RAG 索引正在后台重建..."
     return msg
 
 

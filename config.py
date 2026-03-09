@@ -27,6 +27,16 @@ class Config:
     VISION_API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
     VISION_MODEL = "qwen-vl-max"
 
+    # ── 向量检索（RAG）────────────────────────────────────────
+    EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", os.getenv("VISION_API_KEY", ""))
+    EMBEDDING_API_URL = os.getenv(
+        "EMBEDDING_API_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings",
+    )
+    EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
+    RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))
+    RAG_CHUNK_SIZE = int(os.getenv("RAG_CHUNK_SIZE", "800"))
+
     # ── 飞书多维表格（用户反馈收集）────────────────────────────
     BITABLE_APP_TOKEN = os.getenv("BITABLE_APP_TOKEN", "")
     BITABLE_TABLE_ID = os.getenv("BITABLE_TABLE_ID", "")
