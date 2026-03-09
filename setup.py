@@ -419,11 +419,16 @@ def main():
     _print_step(4, TOTAL_STEPS, "可选功能配置")
 
     # 图片理解
-    if questionary.confirm("  启用图片理解？（用户发送截图时自动分析报错）", default=False).ask():
-        console.print("  [dim]使用阿里云百炼 Qwen-VL，需在 https://bailian.console.aliyun.com/ 申请 API Key[/dim]")
+    if questionary.confirm("  启用截图分析？（用户发截图时，AI 自动读图并回复分析结果）", default=False).ask():
+        console.print(
+            "  [dim]需要阿里云百炼的 API Key（免费注册，按用量付费，通常每月几块钱）\n"
+            "  注册地址：https://bailian.console.aliyun.com/\n"
+            "  注册后在「API Key 管理」中创建一个 Key，复制粘贴到下方。\n"
+            "  启用后，用户发送的截图也会自动附在反馈记录里（如果同时开启了反馈收集）。[/dim]\n"
+        )
         vision_key = questionary.password("  阿里云 API Key：").ask()
         config["vision_api_key"] = (vision_key or "").strip()
-        _ok("图片理解已启用")
+        _ok("截图分析已启用")
     else:
         config["vision_api_key"] = ""
 
