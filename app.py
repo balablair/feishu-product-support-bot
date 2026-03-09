@@ -367,7 +367,7 @@ def handle_message(data: lark.im.v1.P2ImMessageReceiveV1):
 
         logger.info(f"收到消息 [{message.message_id}] 来自 {sender_id}: {text[:80]}")
 
-        # ── 过滤：@bot 直接回复；否则 AI 判断是否 Saion 相关 ─────────────────
+        # ── 过滤：@bot 直接回复；否则 AI 判断是否产品相关 ──────────────────
         if not was_mentioned and not should_reply(text):
             logger.info("消息与产品无关，跳过回复")
             return
