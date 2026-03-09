@@ -25,8 +25,8 @@ from lark_oapi.api.im.v1 import (
 )
 
 from config import Config
-from feedback import ai_detect_and_classify, save_feedback, should_reply
-from docs import load_feishu_docs
+from feedback import ai_detect_and_classify, init_bitable_fields, save_feedback, should_reply
+from docs import load_feishu_docs, load_feishu_wiki
 from rag import RAGIndex
 
 # ── 知识库加载 ────────────────────────────────────────────────────────────────
@@ -119,10 +119,21 @@ feishu_client = (
     .build()
 )
 
+# ── 启动时初始化 Bitable 反馈表格字段 ────────────────────────────────────────
+if Config.BITABLE_APP_TOKEN and Config.BITABLE_TABLE_ID:
+    init_bitable_fields(feishu_client)
+
 # ── 启动时加载飞书云文档知识库 ───────────────────────────────────────────────
-_cloud_knowledge = load_feishu_docs(feishu_client)
-if _cloud_knowledge:
-    KNOWLEDGE = (KNOWLEDGE + "\n\n" + _cloud_knowledge).strip() if KNOWLEDGE else _cloud_knowledge
+_cloud_parts: list[str] = []
+_cloud_docs = load_feishu_docs(feishu_client)
+if _cloud_docs:
+    _cloud_parts.append(_cloud_docs)
+_wiki_docs = load_feishu_wiki(feishu_client)
+if _wiki_docs:
+    _cloud_parts.append(_wiki_docs)
+if _cloud_parts:
+    _combined = "\n\n".join(_cloud_parts)
+    KNOWLEDGE = (KNOWLEDGE + "\n\n" + _combined).strip() if KNOWLEDGE else _combined
     logger.info(f"云文档知识库已合并，知识库总计 {len(KNOWLEDGE)} 字符")
 
 # ── RAG 索引（向量化知识库，每次只检索相关片段）──────────────────────────────
@@ -396,14 +407,19 @@ def generate_reply_with_image(image_b64: str, text: str = "") -> str:
 
 # ── 知识库热更新 ───────────────────────────────────────────────────────────────
 def reload_knowledge() -> str:
-    """重新加载本地文件和飞书云文档知识库，并异步重建 RAG 索引"""
+    """重新加载本地文件、飞书云文档和 Wiki 知识库，并异步重建 RAG 索引"""
     global KNOWLEDGE
+    parts: list[str] = []
     local = load_knowledge()
+    if local:
+        parts.append(local)
     cloud = load_feishu_docs(feishu_client)
-    if local and cloud:
-        KNOWLEDGE = local + "\n\n" + cloud
-    else:
-        KNOWLEDGE = local or cloud
+    if cloud:
+        parts.append(cloud)
+    wiki = load_feishu_wiki(feishu_client)
+    if wiki:
+        parts.append(wiki)
+    KNOWLEDGE = "\n\n".join(parts)
     msg = f"知识库已重新加载，共 {len(KNOWLEDGE)} 字符。"
     logger.info(msg)
     if KNOWLEDGE and Config.EMBEDDING_API_KEY:

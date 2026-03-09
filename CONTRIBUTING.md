@@ -5,8 +5,8 @@
 ## 环境准备
 
 ```bash
-git clone https://github.com/your-org/feishu-support-bot.git
-cd feishu-support-bot
+git clone https://github.com/balablair/feishu-product-support-bot.git
+cd feishu-product-support-bot
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env  # 填入测试用的配置

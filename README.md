@@ -36,6 +36,7 @@ python setup.py
    - `contact:user.base:readonly`（读取用户信息，用于反馈记录）
    - `bitable:app`（写入多维表格，可选）
    - `docx:document:readonly`（读取云文档，可选）
+   - `wiki:wiki:readonly`（读取 Wiki Space，可选）
 3. 在「事件与回调 - 长连接」中开启长连接模式
 4. 将应用发布并邀请加入目标群组
 
@@ -73,11 +74,21 @@ OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 将产品文档复制到 `knowledge/` 目录，支持 `.md` `.txt` `.pdf` `.docx` `.pptx`。
 
-或者在 `.env` 中配置飞书云文档 token，bot 启动时会自动拉取：
+**方式 A：指定单个文档** — 在 `.env` 中填写文档 token，bot 启动时自动拉取：
 
 ```env
 FEISHU_DOC_TOKENS=文档token1,文档token2
 ```
+
+**方式 B：接入整个 Wiki Space（推荐）** — 填写 Wiki 任意页面 token，bot 自动遍历整个 Space 的所有文档：
+
+```env
+FEISHU_WIKI_TOKEN=YLaCwu5OgiF1UGkEF2gcQTKkn8b   # 从 Wiki 页面 URL 末尾获取
+```
+
+> 使用 Wiki Space 需额外两步：① 在飞书开放平台开通 `wiki:wiki:readonly` 权限；② 在 Wiki 设置 → 成员管理中将机器人添加为成员。
+
+知识库更新后，在飞书发送 `/reload`（管理员）即可热更新，无需重启。
 
 ### 6. 启动
 
@@ -100,20 +111,11 @@ docker compose up -d
 
 ### 用户反馈自动收集
 
-在飞书多维表格中创建一张表，包含以下字段：
+**只需创建一张空表格**，bot 首次启动时会自动创建所有字段（反馈内容、用户、问题分类、状态、反馈日期、回复内容、负责人、附件）。
 
-| 字段名 | 类型 |
-|--------|------|
-| 反馈内容 | 文本 |
-| 用户 | 人员 |
-| 问题分类 | 单选（Bug报错 / 功能建议 / 使用问题 / 其他）|
-| 状态 | 单选（待处理 / 处理中 / 已解决）|
-| 反馈日期 | 日期 |
-| 回复内容 | 文本 |
-| 负责人 | 人员（可选）|
-| 附件 | 附件（可选，用于存储截图）|
-
-然后在 `.env` 中配置：
+1. 在飞书中创建一个多维表格，新建一张空白数据表
+2. 从 URL 中获取 `app_token`（`/base/` 后面的部分）和 `table_id`（`/table/` 后面的部分）
+3. 在 `.env` 中配置：
 
 ```env
 BITABLE_APP_TOKEN=从多维表格 URL 中获取
@@ -133,7 +135,7 @@ VISION_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ## 项目结构
 
 ```
-feishu-support-bot/
+feishu-product-support-bot/
 ├── app.py              # 主程序：飞书长连接、消息处理
 ├── config.py           # 配置加载（从环境变量读取）
 ├── feedback.py         # 反馈识别与多维表格写入
@@ -157,7 +159,7 @@ feishu-support-bot/
        ↓
 AI 判断是否与产品相关（基于 PRODUCT_NAME）
        ↓（相关）
-合并知识库（本地文件 + 飞书云文档）+ SOUL.md 构建 system prompt
+合并知识库（本地文件 + 飞书云文档 + Wiki Space）+ SOUL.md 构建 system prompt
        ↓
 调用 AI 生成回复 → 发送到群
        ↓（异步）

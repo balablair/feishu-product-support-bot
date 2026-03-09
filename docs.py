@@ -1,12 +1,12 @@
 """
 飞书云文档知识库加载 — 启动时拉取指定文档内容，合并到知识库
-支持新版文档（docx）和旧版文档（doc）
+支持新版文档（docx）和旧版文档（doc），以及 Wiki Space 自动遍历
 """
 
 import logging
 import lark_oapi as lark
 from lark_oapi.api.docx.v1 import RawContentDocumentRequest
-from lark_oapi.api.wiki.v2 import GetNodeSpaceRequest
+from lark_oapi.api.wiki.v2 import GetNodeSpaceRequest, ListSpaceNodeRequest
 
 from config import Config
 
@@ -24,6 +24,58 @@ def _resolve_wiki_token(client: lark.Client, wiki_token: str) -> str:
     except Exception as e:
         logger.error(f"Wiki token 解析异常: {e}")
     return ""
+
+
+def _resolve_space_id(client: lark.Client, wiki_token: str) -> str:
+    """通过 Wiki 页面 token 获取所属 space_id"""
+    try:
+        req = GetNodeSpaceRequest.builder().token(wiki_token).build()
+        resp = client.wiki.v2.space.get_node(req)
+        if resp.success() and resp.data and resp.data.node:
+            return resp.data.node.space_id or ""
+        logger.error(f"获取 Wiki Space ID 失败: code={resp.code} msg={resp.msg}")
+    except Exception as e:
+        logger.error(f"获取 Wiki Space ID 异常: {e}")
+    return ""
+
+
+def _list_all_nodes(
+    client: lark.Client, space_id: str, parent_token: str = ""
+) -> list[dict]:
+    """递归列出 Wiki Space 下所有文档节点（含子页面）"""
+    nodes: list[dict] = []
+    page_token = None
+
+    while True:
+        builder = ListSpaceNodeRequest.builder().space_id(space_id)
+        if parent_token:
+            builder = builder.parent_node_token(parent_token)
+        if page_token:
+            builder = builder.page_token(page_token)
+
+        try:
+            resp = client.wiki.v2.space_node.list(builder.build())
+            if not resp.success():
+                logger.error(f"列出 Wiki 节点失败: code={resp.code} msg={resp.msg}")
+                break
+
+            for item in resp.data.items or []:
+                if item.obj_type in ("doc", "docx"):
+                    nodes.append(
+                        {"obj_token": item.obj_token, "title": item.title or item.obj_token}
+                    )
+                # 递归处理有子节点的节点（包括文件夹和有子页面的文档）
+                if item.has_children:
+                    nodes.extend(_list_all_nodes(client, space_id, item.node_token))
+
+            if not resp.data.has_more:
+                break
+            page_token = resp.data.page_token
+        except Exception as e:
+            logger.error(f"列出 Wiki 节点异常: {e}")
+            break
+
+    return nodes
 
 
 def _fetch_one(client: lark.Client, token: str) -> str:
@@ -68,4 +120,40 @@ def load_feishu_docs(client: lark.Client) -> str:
         else:
             logger.warning(f"云文档内容为空，跳过: {token}")
 
+    return "\n\n".join(parts)
+
+
+def load_feishu_wiki(client: lark.Client) -> str:
+    """
+    遍历 FEISHU_WIKI_TOKEN 所在的 Wiki Space，自动加载所有文档。
+
+    FEISHU_WIKI_TOKEN 填 Wiki 任意页面的 token（从页面 URL 中获取），
+    程序会自动解析所属 Space 并递归获取全部文档。
+    """
+    wiki_token = Config.FEISHU_WIKI_TOKEN
+    if not wiki_token:
+        return ""
+
+    # 通过页面 token 获取 space_id
+    space_id = _resolve_space_id(client, wiki_token)
+    if not space_id:
+        logger.error("无法解析 Wiki Space ID，跳过 Wiki 知识库加载")
+        return ""
+
+    logger.info(f"开始加载 Wiki Space: {space_id}")
+    node_list = _list_all_nodes(client, space_id)
+    if not node_list:
+        logger.warning(f"Wiki Space {space_id} 无可访问文档")
+        return ""
+
+    parts = []
+    for node in node_list:
+        content = _fetch_one(client, node["obj_token"]).strip()
+        if content:
+            parts.append(f"=== Wiki:{node['title']} ===\n{content}")
+            logger.info(f"Wiki 文档已加载: {node['title']}（{len(content)} 字符）")
+        else:
+            logger.warning(f"Wiki 文档内容为空，跳过: {node['title']}")
+
+    logger.info(f"Wiki Space 加载完成，共 {len(parts)} 篇文档")
     return "\n\n".join(parts)

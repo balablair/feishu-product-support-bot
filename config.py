@@ -45,6 +45,11 @@ class Config:
     # ── 飞书云文档知识库（逗号分隔多个文档 token）──────────────
     FEISHU_DOC_TOKENS = os.getenv("FEISHU_DOC_TOKENS", "")
 
+    # ── 飞书 Wiki Space 知识库 ────────────────────────────────
+    # 填写 Wiki 任意页面的 token（从页面 URL 末尾获取），
+    # bot 会自动解析整个 Space 并加载所有文档
+    FEISHU_WIKI_TOKEN = os.getenv("FEISHU_WIKI_TOKEN", "")
+
     # ── 对话历史配置 ──────────────────────────────────────────
     MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "10"))
     HISTORY_TTL = int(os.getenv("HISTORY_TTL", "1800"))  # 秒，默认 30 分钟

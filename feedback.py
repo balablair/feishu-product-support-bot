@@ -163,6 +163,81 @@ def get_user_name(client: lark.Client, open_id: str) -> str:
     return open_id
 
 
+def init_bitable_fields(client: lark.Client) -> bool:
+    """
+    自动初始化多维表格字段。
+    在 bot 启动时调用一次：列出已有字段，缺少的字段自动创建。
+    用户只需创建一张空表格，无需手动添加任何字段。
+    """
+    if not (Config.BITABLE_APP_TOKEN and Config.BITABLE_TABLE_ID):
+        return False
+
+    # 期望的字段定义：name → (type_id, extra)
+    # 飞书字段类型：1=文本 3=单选 5=日期 11=人员 17=附件
+    DESIRED_FIELDS = [
+        ("反馈内容", 1, None),
+        ("用户",     11, None),
+        ("问题分类", 3, {"options": [{"name": c} for c in _CATEGORIES]}),
+        ("状态",     3, {"options": [{"name": s} for s in ["待处理", "处理中", "已解决", "已关闭"]]}),
+        ("反馈日期", 5, {"date_formatter": "yyyy/MM/dd HH:mm"}),
+        ("回复内容", 1, None),
+        ("负责人",   11, None),
+        ("附件",     17, None),
+    ]
+
+    try:
+        from lark_oapi.api.bitable.v1 import (
+            ListAppTableFieldRequest,
+            CreateAppTableFieldRequest,
+            AppTableField,
+        )
+
+        # 获取已有字段名
+        list_req = (
+            ListAppTableFieldRequest.builder()
+            .app_token(Config.BITABLE_APP_TOKEN)
+            .table_id(Config.BITABLE_TABLE_ID)
+            .build()
+        )
+        list_resp = client.bitable.v1.app_table_field.list(list_req)
+        if not list_resp.success():
+            logger.error(f"获取 Bitable 字段列表失败: code={list_resp.code} msg={list_resp.msg}")
+            return False
+
+        existing = {item.field_name for item in (list_resp.data.items or [])}
+
+        created = 0
+        for name, type_id, property_ in DESIRED_FIELDS:
+            if name in existing:
+                continue
+            field_builder = AppTableField.builder().field_name(name).type(type_id)
+            if property_:
+                field_builder = field_builder.property(property_)
+            create_req = (
+                CreateAppTableFieldRequest.builder()
+                .app_token(Config.BITABLE_APP_TOKEN)
+                .table_id(Config.BITABLE_TABLE_ID)
+                .request_body(field_builder.build())
+                .build()
+            )
+            create_resp = client.bitable.v1.app_table_field.create(create_req)
+            if create_resp.success():
+                created += 1
+                logger.info(f"Bitable 字段已创建: {name}")
+            else:
+                logger.warning(f"Bitable 字段创建失败: {name} | code={create_resp.code} msg={create_resp.msg}")
+
+        if created > 0:
+            logger.info(f"Bitable 表格初始化完成，新建了 {created} 个字段")
+        else:
+            logger.info("Bitable 表格字段已完整，无需初始化")
+        return True
+
+    except Exception as e:
+        logger.error(f"Bitable 字段初始化异常: {e}")
+        return False
+
+
 def save_feedback(
     client: lark.Client,
     open_id: str,

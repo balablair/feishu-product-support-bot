@@ -33,7 +33,7 @@ class RAGIndex:
         model: str,
         top_k: int = 5,
         chunk_size: int = 800,
-        batch_size: int = 25,
+        batch_size: int = 10,  # Dashscope text-embedding-v3 单批最多 10 条
     ):
         self.api_key = api_key
         self.embed_url = embed_url

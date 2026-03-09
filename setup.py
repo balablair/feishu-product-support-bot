@@ -221,6 +221,24 @@ def _write_env(config: dict):
             f"FEISHU_DOC_TOKENS={config['feishu_doc_tokens']}\n",
         ]
 
+    if config.get("feishu_wiki_token"):
+        lines += [
+            "\n# ── 飞书 Wiki Space 知识库 ──────────────────────────\n",
+            f"FEISHU_WIKI_TOKEN={config['feishu_wiki_token']}\n",
+        ]
+
+    if config.get("embedding_api_key"):
+        lines += [
+            "\n# ── RAG 向量检索 ─────────────────────────────────────\n",
+            f"EMBEDDING_API_KEY={config['embedding_api_key']}\n",
+        ]
+
+    if config.get("admin_open_ids"):
+        lines += [
+            "\n# ── 管理员（可使用 /reload 等指令）─────────────────\n",
+            f"ADMIN_OPEN_IDS={config['admin_open_ids']}\n",
+        ]
+
     with open(".env", "w", encoding="utf-8") as f:
         f.writelines(lines)
 
@@ -420,19 +438,59 @@ def main():
         config["bitable_app_token"] = questionary.text("  Bitable App Token：").ask().strip()
         config["bitable_table_id"] = questionary.text("  Table ID：").ask().strip()
         config["feedback_assignee"] = (questionary.text("  默认负责人 open_id（可留空）：").ask() or "").strip()
-        _ok("反馈收集已启用")
+        _ok("反馈收集已启用（bot 首次启动时将自动创建所需字段，无需手动配置表格列）")
     else:
         config["bitable_app_token"] = ""
         config["bitable_table_id"] = ""
 
     # 飞书云文档
     console.print()
-    if questionary.confirm("  配置飞书云文档作为知识库？", default=False).ask():
+    if questionary.confirm("  配置飞书云文档作为知识库？（指定单个/多个文档 token）", default=False).ask():
         console.print("  [dim]从文档 URL 中获取 token 部分，多个文档用英文逗号分隔[/dim]")
         config["feishu_doc_tokens"] = questionary.text("  文档 Token（逗号分隔）：").ask().strip()
         _ok("云文档知识库已配置")
     else:
         config["feishu_doc_tokens"] = ""
+
+    # Wiki Space 知识库
+    console.print()
+    if questionary.confirm("  配置飞书 Wiki Space 作为知识库？（自动加载整个 Space 的所有文档）", default=False).ask():
+        console.print(
+            "  [dim]从 Wiki 页面 URL 末尾获取 token，例如：\n"
+            "  https://xxx.feishu.cn/wiki/[bold]YLaCwu5OgiF1UGkEF2gcQTKkn8b[/bold]\n"
+            "  所需额外操作：① 开通 wiki:wiki:readonly 权限；② 在 Wiki 设置中添加机器人为成员[/dim]\n"
+        )
+        config["feishu_wiki_token"] = questionary.text("  Wiki 页面 Token：").ask().strip()
+        _ok("Wiki Space 知识库已配置")
+    else:
+        config["feishu_wiki_token"] = ""
+
+    # RAG 向量检索
+    console.print()
+    # 如果已配置 vision_api_key，提示复用
+    has_vision = bool(config.get("vision_api_key"))
+    rag_hint = "（将复用已配置的阿里云 API Key）" if has_vision else "（需要阿里云百炼 API Key，与图片理解共用同一账号）"
+    if questionary.confirm(f"  启用 RAG 向量检索？{rag_hint} 知识库较大时强烈推荐", default=True).ask():
+        if has_vision:
+            config["embedding_api_key"] = config["vision_api_key"]
+            _ok("RAG 已启用，复用阿里云 API Key")
+        else:
+            console.print("  [dim]前往 https://bailian.console.aliyun.com/ 申请 API Key[/dim]")
+            emb_key = questionary.password("  阿里云 API Key：").ask()
+            config["embedding_api_key"] = (emb_key or "").strip()
+            _ok("RAG 向量检索已启用")
+    else:
+        config["embedding_api_key"] = ""
+        _warn("未启用 RAG，将使用全量知识库模式（知识库较大时会消耗更多 token）")
+
+    # 管理员
+    console.print()
+    if questionary.confirm("  配置管理员？（管理员可在群内发送 /reload 热更新知识库）", default=False).ask():
+        console.print("  [dim]在飞书中打开对方名片，或通过 API 获取 open_id（格式：ou_xxx），多个用逗号分隔[/dim]")
+        config["admin_open_ids"] = questionary.text("  管理员 open_id（逗号分隔）：").ask().strip()
+        _ok("管理员已配置")
+    else:
+        config["admin_open_ids"] = ""
 
     # ──────────────────────────────────────────────────────────────────────────
     # Step 5: 写入配置文件
